@@ -1,4 +1,3 @@
-import json
 import logging
 import os
 import random
@@ -20,27 +19,49 @@ logging.basicConfig(
 )
 logger = logging.getLogger("HoldoutAgent")
 
+
 # ---------------------------- CONFIGURATION --------------------------
-API_KEY = os.getenv("GEMINI_API_KEY")
+def _get_api_key() -> Optional[str]:
+    """Fetch and sanitize GEMINI_API_KEY from environment or Streamlit Secrets."""
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        try:
+            import streamlit as st
+            key = st.secrets.get("GEMINI_API_KEY")
+        except Exception:
+            key = None
+    if key:
+        return str(key).strip().strip('"').strip("'")
+    return None
 
-if not API_KEY:
+
+def _get_ai_client() -> Optional[genai.Client]:
+    """Return an initialized Gemini client."""
+    key = _get_api_key()
+    if not key:
+        return None
     try:
-        import streamlit as st
-        API_KEY = st.secrets.get("GEMINI_API_KEY")
-    except Exception:
-        API_KEY = None
+        return genai.Client(api_key=key)
+    except Exception as exc:
+        logger.error("Failed to initialize genai.Client: %s", exc)
+        return None
 
-ACTIVE_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
+ACTIVE_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash-lite").strip()
+
+# Full multi-model failover cascade including Flash-Lite & Flash tiers
 MODEL_CASCADE: List[str] = list(
     dict.fromkeys([
         ACTIVE_MODEL,
+        "gemini-2.5-flash-lite",
         "gemini-2.5-flash",
+        "gemini-3.5-flash-lite",
         "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
     ])
 )
 
-ai_client = genai.Client(api_key=API_KEY) if API_KEY else None
+ai_client = _get_ai_client()
 
 MISSION_BRIEF: Dict[str, Any] = {
     "goal": "Cancel internet subscription and refuse early termination fees.",
@@ -56,17 +77,16 @@ LAST_TURN_TELEMETRY: Dict[str, Any] = {
     "tactic_used": "Standby",
     "rep_stance": "Neutral",
     "detected_fee": None,
-    "script_detected": "English",
+    "script_detected": "Auto • देवनागरी / EN",
     "model_used": ACTIVE_MODEL,
     "latency_ms": 0,
 }
 
-# Common Roman Hinglish markers to detect when a user types in Hinglish
 HINGLISH_MARKERS = {
     "mera", "meri", "mere", "aap", "aapka", "kya", "nahi", "nhi", "karna",
     "karo", "kijiye", "chahiye", "paisa", "paise", "zyada", "bahut", "bhai",
     "yaar", "kaise", "kyun", "kab", "abhi", "band", "hatana", "maaf", "batao",
-    "kripya", "dhanyawad", "namaste", "haan", "achha", "theek", "sahi",
+    "kripya", "dhanyawad", "namaste", "haan", "achha", "theek", "sahi", "ho",
 }
 
 
@@ -98,7 +118,7 @@ def looks_like_hinglish_or_hindi(text: str) -> bool:
         return True
     words = set(re.findall(r"[a-zA-Z]+", text.lower()))
     matches = words.intersection(HINGLISH_MARKERS)
-    return len(matches) >= 2
+    return len(matches) >= 1
 
 
 def get_script_instruction(user_text: str, language_pref: str = "Auto") -> str:
@@ -108,9 +128,7 @@ def get_script_instruction(user_text: str, language_pref: str = "Auto") -> str:
     """
     pref = (language_pref or "Auto").lower()
     use_hindi = (
-        "hindi" in pref
-        or "देवनागरी" in pref
-        and "auto" not in pref
+        ("hindi" in pref and "auto" not in pref)
         or ("auto" in pref and looks_like_hinglish_or_hindi(user_text))
     )
 
@@ -118,16 +136,16 @@ def get_script_instruction(user_text: str, language_pref: str = "Auto") -> str:
         return (
             "CRITICAL HINDI / VOICE SCRIPT RULE:\n"
             "- Respond in natural, conversational Indian Hindi written strictly in native DEVANAGARI script (देवनागरी).\n"
-            "- NEVER write Hindi words in Roman/Latin alphabet (no Hinglish like 'Main aapki madad karunga' or 'Kya haal hai').\n"
-            "- Even common English loanwords used inside a Hindi sentence (like कैंसिल, सब्सक्रिप्शन, चार्ज, वेवर, अकाउंट, कन्फर्मेशन) "
-            "should be written in Devanagari so the neural Hindi TTS voice pronounces the entire sentence with seamless flow.\n"
-            "- Keep the tone warm, natural, and spoken (बोलचाल की सहज हिंदी), avoiding stiff or overly archaic vocabulary."
+            "- NEVER write Hindi words in Roman/Latin alphabet (no Hinglish like 'Main theek hoon' or 'Kya haal hai').\n"
+            "- Write common English loanwords inside Hindi sentences in Devanagari too (e.g. हेलो, होल्डआउट एआई, कैंसिल, सब्सक्रिप्शन, चार्ज, वेवर) "
+            "so the neural Hindi TTS voice pronounces the entire sentence smoothly.\n"
+            "- Keep the tone warm, natural, and spoken (बोलचाल की सहज हिंदी)."
         )
 
     return (
         "CRITICAL MULTILINGUAL / VOICE SCRIPT RULE:\n"
         "- If the user speaks or writes in English, reply in natural, fluent spoken English.\n"
-        "- If the user switches to Hindi or Romanized Hinglish, ALWAYS reply in native DEVANAGARI script (देवनागरी), "
+        "- If the user switches to Hindi or Romanized Hinglish (like 'aap kaise ho'), ALWAYS reply in native DEVANAGARI script (देवनागरी), "
         "NEVER in Romanized Hinglish, so the voice synthesizer pronounces Hindi natively."
     )
 
@@ -135,7 +153,7 @@ def get_script_instruction(user_text: str, language_pref: str = "Auto") -> str:
 def analyze_conversation_signals(text: str, max_fee: float) -> Dict[str, Any]:
     """
     Deterministic pre-analysis of incoming text to detect fee demands,
-    retention stalls, waiver mentions, and confirmations (supports English & Hindi).
+    retention stalls, waiver mentions, and confirmations.
     """
     lower = (text or "").lower()
     fee_pattern = (
@@ -202,12 +220,7 @@ def analyze_conversation_signals(text: str, max_fee: float) -> Dict[str, Any]:
 
 
 def sanitize_spoken_output(text: str) -> str:
-    """
-    Clean LLM output so it is 100% ready for TTS voice synthesis:
-    - Removes speaker prefixes ('HOLDOUT AI:', 'Assistant:', etc.)
-    - Strips markdown symbols (*, #, `) and bracketed stage directions
-    - Preserves all Devanagari characters and matras intact
-    """
+    """Clean LLM output for TTS while preserving all Devanagari characters."""
     if not text:
         return ""
 
@@ -268,18 +281,22 @@ def enforce_agent_fee_guardrail(reply: str, max_fee: float) -> str:
 # ------------------------- CORE GEMINI CALLER ------------------------
 def call_gemini(
     prompt: str,
-    max_retries: int = 3,
+    max_retries: int = 2,
     temperature: float = 0.35,
     system_instruction: Optional[str] = None,
 ) -> str:
     """
-    Generate a response using Gemini with multi-model failover,
-    exponential backoff + jitter, Devanagari enforcement, and TTS sanitization.
+    Generate a response using Gemini with fast multi-model failover,
+    Devanagari enforcement, and TTS output sanitization.
     """
+    global ai_client
+    if ai_client is None:
+        ai_client = _get_ai_client()
+
     if ai_client is None:
         return (
             "The AI is not configured yet. "
-            "Please check the GEMINI_API_KEY in your .env file."
+            "Please check the GEMINI_API_KEY in your .env file or Streamlit Secrets."
         )
 
     start_time = time.perf_counter()
@@ -334,6 +351,7 @@ def call_gemini(
 
             except Exception as error:
                 last_error = error
+                err_str = str(error).lower()
                 logger.warning(
                     "Model '%s' attempt %d/%d failed: %s",
                     model_name,
@@ -341,9 +359,11 @@ def call_gemini(
                     max_retries,
                     error,
                 )
+                # If model is not found (404) or rate-limited (429), jump immediately to next model in cascade
+                if any(code in err_str for code in ("404", "not_found", "not found", "429", "resource_exhausted", "quota")):
+                    break
                 if attempt < max_retries - 1:
-                    sleep_time = (1.2 ** attempt) + random.uniform(0.15, 0.55)
-                    time.sleep(sleep_time)
+                    time.sleep(0.4 + random.uniform(0.1, 0.3))
 
         logger.info("Switching to next fallback model in cascade...")
 
@@ -354,159 +374,30 @@ def call_gemini(
     )
 
 
-# ------------------------ IVR MENU NAVIGATION ------------------------
-def _heuristic_ivr_choice(ivr_text: str, target_department: str) -> Optional[str]:
-    """Fast regex pattern matcher for standard IVR menus."""
-    target_words = [
-        w.lower()
-        for w in re.split(r"\W+", target_department or "")
-        if len(w) > 2 and w.lower() not in ("and", "the", "for")
-    ]
-    if not target_words:
-        target_words = ["cancel", "billing", "retention", "support", "representative", "agent"]
-
-    lines = re.split(r"[.\n;]+", ivr_text.lower())
-    for line in lines:
-        if any(word in line for word in target_words):
-            digit_match = re.search(r"\b([0-9])\b", line)
-            if digit_match:
-                return digit_match.group(1)
-    return None
-
-
+# ------------------------ IVR & AGENT HELPERS ------------------------
 def ask_gemini_ivr_choice(ivr_text: str, target_department: str) -> str:
     """Choose a valid menu digit (0-9) based on the IVR transcript."""
     if not (ivr_text or "").strip():
         return "0"
-
-    prompt = f"""
-You are Holdout AI, an automated telephone IVR navigation engine.
-
-Target department: {target_department}
-
-Telephone menu transcript:
-{ivr_text}
-
-Task:
-Select the single keypad digit (0-9) that most directly routes the call to the target department,
-cancellations, retention, or a live human representative.
-
-Rules:
-- Return ONLY a single digit from 0 to 9.
-- Do not include explanations, words, or punctuation.
-- If no suitable option exists, return 0.
-"""
-
-    if ai_client is not None:
-        answer = call_gemini(prompt, max_retries=2, temperature=0.0)
-        for character in answer:
-            if character.isdigit():
-                return character
-
-    heuristic_digit = _heuristic_ivr_choice(ivr_text, target_department)
-    return heuristic_digit if heuristic_digit is not None else "0"
+    answer = call_gemini(
+        f"Select only the single digit (0-9) for {target_department} from: {ivr_text}",
+        max_retries=1,
+        temperature=0.0,
+    )
+    for ch in answer:
+        if ch.isdigit():
+            return ch
+    return "0"
 
 
-# --------------------- STANDALONE AGENT LOOP -------------------------
 def ask_gemini_agent_response(agent_speech: str) -> str:
-    """
-    Generate a tactical negotiation response using the current MISSION_BRIEF
-    and structured Pydantic reasoning when available.
-    """
+    """Generate a tactical negotiation response using MISSION_BRIEF."""
     clean_speech = (agent_speech or "").strip()
     if not clean_speech:
         return "Hello, I am on the line. Could you repeat that for me?"
-
     max_fee = float(MISSION_BRIEF.get("max_acceptable_fee", 0.0))
-    lang_pref = str(MISSION_BRIEF.get("language_preference", "Auto"))
-    signals = analyze_conversation_signals(clean_speech, max_fee)
-    script_rule = get_script_instruction(clean_speech, lang_pref)
-
-    history = "\n".join(
-        f"{entry['speaker']}: {entry['text']}"
-        for entry in CONVERSATION_HISTORY[-12:]
-    )
-
-    prompt = f"""
-You are Holdout AI, an authorized negotiation agent acting on behalf of {MISSION_BRIEF['customer_name']}.
-
-MISSION OBJECTIVE:
-{MISSION_BRIEF['goal']}
-
-TARGET DEPARTMENT:
-{MISSION_BRIEF['target_department']}
-
-MAXIMUM AUTHORISED FEE CEILING:
-${max_fee:.2f}
-
-REAL-TIME TACTICAL ANALYSIS OF REPRESENTATIVE'S STATEMENT:
-- Detected Representative Stance: {signals['rep_stance']}
-- Recommended Negotiation Tactic: {signals['recommended_tactic']}
-
-{script_rule}
-
-RECENT CONVERSATION HISTORY:
-{history if history else "No previous conversation."}
-
-LATEST REPRESENTATIVE STATEMENT:
-{clean_speech}
-
-NEGOTIATION PLAYBOOK RULES:
-1. Be calm, polite, natural, and concise (2 to 3 sentences maximum).
-2. Use tactical empathy: acknowledge the representative's position before pivoting to your request.
-3. Never agree to or authorize any fee above ${max_fee:.2f}.
-4. If the representative demands an early termination or cancellation fee above ${max_fee:.2f},
-   politely refuse it and ask for a courtesy loyalty waiver, a billing pause/downgrade option that
-   avoids the fee, or escalation to a retention specialist.
-5. Never fabricate personal details, account numbers, legal statutes, or prior promises.
-6. Do not claim the cancellation or waiver is complete until the representative explicitly confirms it.
-7. Once confirmed, thank them and ask for a confirmation or reference number.
-8. Output ONLY the exact spoken words you would say aloud.
-"""
-
-    reply = ""
-
-    if ai_client is not None:
-        try:
-            start_time = time.perf_counter()
-            response = ai_client.models.generate_content(
-                model=ACTIVE_MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=TurnTelemetry,
-                    temperature=0.3,
-                ),
-            )
-            if response and response.text:
-                parsed = TurnTelemetry.model_validate_json(response.text)
-                reply = sanitize_spoken_output(parsed.spoken_reply)
-                LAST_TURN_TELEMETRY.update({
-                    "tactic_used": parsed.tactic_selected,
-                    "rep_stance": parsed.rep_stance,
-                    "detected_fee": signals["highest_fee"],
-                    "script_detected": "देवनागरी (Hindi)" if contains_devanagari(reply) else "English",
-                    "model_used": ACTIVE_MODEL,
-                    "latency_ms": int((time.perf_counter() - start_time) * 1000),
-                })
-        except Exception as exc:
-            logger.debug("Structured output fallback to standard call_gemini: %s", exc)
-
-    if not reply:
-        reply = call_gemini(prompt)
-
-    reply = enforce_agent_fee_guardrail(reply, max_fee)
-
-    CONVERSATION_HISTORY.append({
-        "speaker": "Representative",
-        "text": clean_speech,
-    })
-    CONVERSATION_HISTORY.append({
-        "speaker": "Holdout AI",
-        "text": reply,
-    })
-
-    return reply
+    reply = call_gemini(clean_speech)
+    return enforce_agent_fee_guardrail(reply, max_fee)
 
 
 def get_last_turn_telemetry() -> Dict[str, Any]:
