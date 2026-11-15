@@ -22,7 +22,17 @@ logger = logging.getLogger("HoldoutAgent")
 
 # ---------------------------- CONFIGURATION --------------------------
 API_KEY = os.getenv("GEMINI_API_KEY")
+
+# If the key is not found in .env, check Streamlit Cloud Secrets
+if not API_KEY:
+    try:
+        import streamlit as st
+        API_KEY = st.secrets.get("GEMINI_API_KEY")
+    except Exception:
+        API_KEY = None
+
 ACTIVE_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
+
 
 # Automatic failover cascade if the primary model is rate-limited or unavailable
 MODEL_CASCADE: List[str] = [
