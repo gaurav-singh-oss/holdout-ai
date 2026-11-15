@@ -1,0 +1,18 @@
+# Core AI & Structured Outputs
+google-genai>=1.0.0
+pydantic>=2.7.0
+python-dotenv>=1.0.1
+
+# FastAPI Mock Call Center & WebSocket Client/Server
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+websockets>=13.0
+
+# Streamlit UI & Browser Microphone Capture
+streamlit>=1.38.0
+streamlit-mic-recorder>=0.0.8
+
+# Multi-Tier Neural & Offline Text-to-Speech
+edge-tts>=6.1.12
+gTTS>=2.5.3
+pyttsx3>=2.90
