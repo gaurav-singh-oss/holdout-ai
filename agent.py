@@ -37,7 +37,8 @@ ACTIVE_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite")
 # Automatic failover cascade if the primary model is rate-limited or unavailable
 MODEL_CASCADE: List[str] = [
     ACTIVE_MODEL,
-    "gemini-3.8-flash",
+    "gemini-2.5-flash",
+    "gemini-2.0-flash",
 ]
 
 # Deduplicate while preserving order
